@@ -6,7 +6,7 @@ from aiohttp.http import WSMsgType
 from django.contrib.staticfiles import handlers as static_handlers
 from django.core.management.commands import runserver as dj_runserver
 
-from tulius.websockets.asgi import asgi_handler
+from django_asyncio import asgi_handler
 
 logger = logging.getLogger('django.server')
 
