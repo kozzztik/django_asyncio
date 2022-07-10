@@ -10,3 +10,9 @@ class DjangoAsyncio(AppConfig):
 
     def ready(self):
         runserver.patch()
+        from django_asyncio import middleware
+        from django.contrib.sessions.middleware import SessionMiddleware
+        SessionMiddleware.process_request = \
+            middleware.SessionMiddleware.process_request
+        from django.contrib.auth import middleware as dj_auth_middleware
+        dj_auth_middleware.get_user = middleware.get_user

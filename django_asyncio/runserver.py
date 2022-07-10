@@ -2,28 +2,27 @@ import asyncio
 import logging
 
 from aiohttp import web
-from aiohttp.http import WSMsgType
 from django.contrib.staticfiles import handlers as static_handlers
 from django.core.management.commands import runserver as dj_runserver
-
-from django_asyncio import asgi_handler
+from django.conf import settings
+from django_asyncio import aiohttp_handler
 
 logger = logging.getLogger('django.server')
 
 
-class ASGIRequestHandler:
-    _response_start = None
-    _response_body = None
-    _ws = None
+class Application(web.Application):
+    def __init__(self, *args, **kwargs):
+        super(Application, self).__init__(*args, **kwargs)
+        self.handler = aiohttp_handler.AiohttpHandler()
+        self.handle_static = False
 
-    def __init__(self, request):
-        self.body_read = False
-        self.request = request
+    @staticmethod
+    def create_scope(request):
         if request.headers.get('Upgrade') == 'websocket':
             connection_type = 'websocket'
         else:
             connection_type = 'http'
-        self.scope = {
+        return {
             'type': connection_type,
             'root_path': '',
             'path': request.path,
@@ -35,93 +34,38 @@ class ASGIRequestHandler:
             'headers': [(n.lower(), v) for n, v in request.raw_headers],
         }
 
-    async def receive(self):
-        if not self.body_read:
-            self.body_read = True
-            data = await self.request.read()
-            if self.scope['type'] == 'websocket':
-                msg_type = 'websocket.connect'
-            else:
-                msg_type = 'body'
-            return {
-                'type': msg_type,
-                'body': data,
-            }
-        if self._ws is not None:
-            msg = await self._ws.receive()
-            if msg.type in (
-                    WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-                return {'type': 'websocket.disconnect'}
-            return {
-                'type': 'websocket.receive',
-                'text': msg.data,
-            }
-        return {'type': 'body end'}
-
-    async def send(self, context):
-        if context['type'] == 'http.response.start':
-            self._response_start = context
-        elif context['type'] == 'http.response.body':
-            if not self._response_body:
-                self._response_body = []
-            if 'body' in context:
-                self._response_body.append(context['body'])
-        elif context['type'] == 'websocket.accept':
-            self._ws = web.WebSocketResponse()
-            await self._ws.prepare(self.request)
-        elif context['type'] == 'websocket.send':
-            await self._ws.send_str(context['text'])
-        elif context['type'] == 'websocket.close':
-            await self._ws.close()
-        else:
-            raise NotImplementedError()
-
-    async def handle(self, application):
+    async def _handle(self, request):
+        status_code = 500
         try:
-            await application(self.scope, self.receive, self.send)
-            if self._ws is not None:
-                return self._ws
-            return web.Response(
-                status=self._response_start['status'],
-                headers=[
-                    (n.decode('ascii'), v.decode('latin1'))
-                    for n, v in self._response_start['headers']],
-                body=b''.join(self._response_body)
-            )
+            scope = self.create_scope(request)
+            if self.handle_static and self.handler._should_handle(
+                    request.path):
+                response = await self.handler.handle_static(scope, request)
+            else:
+                response = await self.handler.process(scope, request)
+            status_code = response.status
+            return response
         except Exception as e:
             logger.exception(e)
+            return web.Response(status=500)
         finally:
-            if self._response_start:
-                status_code = self._response_start.get('status', 500)
-            else:
-                status_code = 500
             if status_code >= 500:
                 level = logger.error
             elif status_code >= 400:
                 level = logger.warning
             else:
                 level = logger.info
-
-            level('%s %s', self.request.path, status_code)
+            level('%s %s %s', request.method, request.path, status_code)
 
 
 class ASGIServer:
     def __init__(self, server_address, handler, ipv6):
-        self.app = web.Application()
-        self.asgi_application = asgi_handler.get_asgi_application()
+        self.app = Application()
         self.server_address = server_address
-        self.app.add_routes([
-            web.get('/{tail:.*}', self.aiohttp_handler),
-            web.post('/{tail:.*}', self.aiohttp_handler),
-            web.put('/{tail:.*}', self.aiohttp_handler),
-            web.options('/{tail:.*}', self.aiohttp_handler),
-        ])
 
     def set_app(self, wsgi_handler):
         if isinstance(wsgi_handler, static_handlers.StaticFilesHandler):
-            self.asgi_application = static_handlers.ASGIStaticFilesHandler(
-                self.asgi_application
-            )
+            self.app.handle_static = True
 
     def serve_forever(self):
         loop = asyncio.new_event_loop()
@@ -131,11 +75,8 @@ class ASGIServer:
             host=self.server_address[0],
             port=self.server_address[1],
             print=None,
+            keepalive_timeout=getattr(settings, 'HTTP_KEEP_ALIVE', 75.0),
         )
-
-    async def aiohttp_handler(self, request):
-        handler = ASGIRequestHandler(request)
-        return await handler.handle(self.asgi_application)
 
 
 def patch():
