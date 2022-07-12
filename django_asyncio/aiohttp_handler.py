@@ -37,7 +37,7 @@ class AiohttpHandler(dj_asgi.ASGIHandler, static.StaticFilesHandlerMixin):
         super(AiohttpHandler, self).__init__()
         self.base_url = static.urlparse(self.get_base_url())
         self.threadpool = ThreadPoolExecutor(
-            max_workers=getattr(settings, 'HTTP_THREADS', 10))
+            max_workers=int(getattr(settings, 'HTTP_THREADS', 10)))
         set_urlconf(settings.ROOT_URLCONF)
         self.loop = asyncio.get_event_loop()
 
